@@ -251,11 +251,30 @@ export function replicateSolid<RxDocType>(
   }
 
   /**
+   * Read a document ONLY if it is SELF-CONSISTENT for `resourceName`: the body
+   * deserialises (via {@link readDoc}) AND the document's OWN primary key maps
+   * back to exactly this resource name. Returns `null` otherwise. This is the one
+   * gate used everywhere a stored resource is turned into a replicated document
+   * (both orphan re-indexing AND the pull), so a resource whose body's primary
+   * key disagrees with its name — externally written or corrupted — is never
+   * pulled under the wrong checkpoint key.
+   */
+  async function readConsistentDoc(
+    resourceName: string,
+  ): Promise<{ doc: WithDeleted<RxDocType>; etag: string | null } | null> {
+    const read = await readDoc(resourceName);
+    if (read === null) return null;
+    const docKey = String((read.doc as Record<string, unknown>)[primaryPath]);
+    if (keyToResourceName(docKey) !== resourceName) return null;
+    return read;
+  }
+
+  /**
    * True iff `resourceName` is a USABLE managed document: its name decodes to a
    * key whose canonical resource name round-trips (so a foreign / odd
-   * `doc.*.json` is excluded), AND its body deserialises. Used to gate orphan
-   * re-indexing so an unmanaged or corrupt resource is never promoted into the
-   * pull index.
+   * `doc.*.json` is excluded), AND it is self-consistent (body deserialises and
+   * its primary key maps back to this name). Used to gate orphan re-indexing so
+   * an unmanaged / corrupt / mismatched resource is never promoted into the index.
    */
   async function isUsableDoc(resourceName: string): Promise<boolean> {
     let key: string;
@@ -267,15 +286,8 @@ export function replicateSolid<RxDocType>(
     // The canonical encoding of the decoded key must equal the resource name —
     // rejects any non-canonical / ambiguous name a foreign tool may have minted.
     if (keyToResourceName(key) !== resourceName) return false;
-    // The body must deserialise to a doc we can replicate…
-    const read = await readDoc(resourceName);
-    if (read === null) return false;
-    // …AND the document's OWN primary key must map back to THIS resource name.
-    // Otherwise a foreign `doc.a.json` whose body says `{ id: "b" }` would be
-    // promoted and later pulled under the wrong checkpoint key — reject the
-    // mismatch so only self-consistent documents enter the index.
-    const docKey = String((read.doc as Record<string, unknown>)[primaryPath]);
-    return keyToResourceName(docKey) === resourceName;
+    // …AND the body must deserialise to a SELF-CONSISTENT document.
+    return (await readConsistentDoc(resourceName)) !== null;
   }
 
   /** Serialise the document master state to its on-pod body + content type. */
@@ -384,9 +396,14 @@ export function replicateSolid<RxDocType>(
     for (const c of after) {
       if (documents.length >= limit) break;
       const candidateCp: SolidCheckpoint = { id: c.key, updatedAt: c.updatedAt };
-      const read = await readDoc(c.name);
+      // Read ONLY a self-consistent document (body deserialises AND its primary
+      // key maps back to this resource name) — so an externally-written /
+      // corrupted indexed resource whose body's id disagrees with its name is
+      // never pulled under the wrong checkpoint key.
+      const read = await readConsistentDoc(c.name);
       // Advance the checkpoint to this candidate regardless of readability — a
-      // skipped (raced-away / unreadable) entry must not pin the checkpoint.
+      // skipped (raced-away / unreadable / inconsistent) entry must not pin the
+      // checkpoint (no stall).
       next = candidateCp;
       if (!read) continue;
       documents.push(read.doc);

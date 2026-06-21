@@ -564,3 +564,39 @@ describe("round-4 hardening — key/resource consistency + no pull stall", () =>
     expect(ids).not.toContain("early"); // the corrupt earlier doc is skipped, not fatal
   });
 });
+
+describe("round-5 hardening — an already-indexed mismatched resource is not pulled", () => {
+  it("skips an indexed doc.a.json whose body's primary key is 'b' (no wrong-key pull)", async () => {
+    const pod = makePod(CONTAINER);
+    const store = new SolidDocStore({ container: CONTAINER, fetch: pod.fetchImpl });
+
+    // Seed a real, consistent document so a meta resource exists.
+    const c1 = await makeCollection();
+    await c1.insert({ id: "good", title: "Good", n: 1 });
+    await replicateOnce(c1, pod);
+
+    // Now forge a MISMATCHED resource: doc.a.json whose body claims id "b", AND
+    // manually add it to the meta index (simulating an externally-written /
+    // corrupted index entry that the orphan sweep would have rejected).
+    const aName = keyToResourceName("a");
+    const mismatched = withDeleted({ id: "b", title: "B", n: 9 }, false);
+    await store.putDoc(aName, JSON.stringify({ v: 1, doc: mismatched }), "application/json");
+    const meta = JSON.parse((await store.getDoc("meta.json"))?.body ?? "{}") as {
+      v: 1;
+      counter: number;
+      index: Record<string, number>;
+    };
+    meta.counter += 1;
+    meta.index[aName] = meta.counter; // force it into the index
+    await store.putDoc("meta.json", JSON.stringify(meta), "application/json");
+
+    // A fresh consumer pulling now must NOT receive a document under key "b" (nor
+    // "a") for the mismatched resource — only the consistent "good" doc.
+    const c2 = await makeCollection();
+    await replicateOnce(c2, pod);
+    const ids = (await c2.find().exec()).map((d) => d.id).sort();
+    expect(ids).toEqual(["good"]);
+    expect(ids).not.toContain("a");
+    expect(ids).not.toContain("b");
+  });
+});
