@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jeswr/full-solid-ecosystem/main/tracking/schema/suite.schema.json",
+  "id": "rxdb-solid",
+  "kind": "package",
+  "name": "rxdb-solid",
+  "repo": "https://github.com/jeswr/rxdb-solid",
+  "category": "integration",
+  "maturity": "alpha",
+  "visibility": "public",
+  "stack": {
+    "lang": "TypeScript (ESM, NodeNext)",
+    "runtime": "Node >=20 / browser",
+    "rxdb": "rxdb ^16 (peerDependency)",
+    "rdf": "n3 ^2.x",
+    "fetch-rdf": "@jeswr/fetch-rdf ^0.1",
+    "solid-object": "@solid/object ^0.6",
+    "test": "vitest ^4.x",
+    "lint": "@biomejs/biome ^2.x",
+    "node": ">=20"
+  },
+  "dependsOn": [],
+  "integration": {
+    "ecosystem": "RxDB",
+    "note": "An RxDB replication plugin that syncs an RxDB collection to/from a Solid pod via replicateRxCollection. The pod is the replication REMOTE (master); the plugin supplies the pull + push handlers reading/writing one pod resource per document through an INJECTABLE authenticated fetch (the auth seam — never a concrete auth lib). JSON-default storage (each document stored as one application/json resource carrying the WithDeleted master state) with an OPTIONAL injectable toRdf/fromRdf Linked-Data seam (store each document as Turtle/JSON-LD instead, losslessly round-tripping incl. _deleted + the primary key). Checkpoint-based incremental pull over a monotonic per-collection write counter (a total order, wall-clock-independent) held in a small per-collection metadata resource (filtered out of document listings). Tombstone soft-deletes (a _deleted write, not a hard DELETE — so deletions propagate to other clients); hard GC is an explicit SolidDocStore.deleteDoc seam. Conflict resolution is delegated to RxDB's collection conflictHandler — the plugin only DETECTS conflicts (pod master state vs the fork's assumedMasterState) and returns the real master, never picking a winner. Fail-closed scope guard (assertWithinBase on every op) + injective, traversal-proof key sanitisation (keyToResourceName / resourceNameToKey) are the SSRF surface. RDF discipline: the only RDF parsed is the LDP container LISTING (read-only) via @jeswr/fetch-rdf parse + @solid/object ContainerDataset — never hand-built triples. rxdb is a peerDependency (not bundled). GitHub-installable now (committed dist/, ignore-scripts=true); npm publish deferred, not a blocker. Live cross-client pull via WebSocketChannel2023 (call reSync() on a container-change notification) is a DOCUMENTED follow-up seam."
+  }
+}

@@ -1,0 +1,12 @@
+# roborev config — matches the solid-app-suite default (prod-solid-server).
+# Reviewer is codex (a non-Anthropic model) so code is never reviewed only by
+# the model family that wrote it. Worktrees share .git/hooks, so sub-agent
+# commits are reviewed too.
+
+agent = "codex"
+model = "gpt-5.5"
+
+review_min_severity = "low"
+
+reuse_review_session = true
+reuse_review_session_lookback = 5

@@ -1,0 +1,82 @@
+{
+  "name": "@jeswr/rxdb-solid",
+  "version": "0.1.0",
+  "description": "An RxDB replication plugin that syncs an RxDB collection to/from a Solid pod — one pod resource per document via an injectable authenticated fetch. JSON-default storage with an optional injectable toRdf/fromRdf Linked-Data seam, checkpoint-based incremental pull, tombstone soft-deletes, conflict resolution delegated to RxDB's conflictHandler, a fail-closed scope guard and key sanitisation.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Jesse Wright",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeswr/rxdb-solid.git"
+  },
+  "homepage": "https://github.com/jeswr/rxdb-solid#readme",
+  "bugs": {
+    "url": "https://github.com/jeswr/rxdb-solid/issues"
+  },
+  "keywords": [
+    "rxdb",
+    "rxdb-solid",
+    "solid",
+    "replication",
+    "sync",
+    "offline",
+    "pod",
+    "rdf"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./scope": {
+      "types": "./dist/scope.d.ts",
+      "import": "./dist/scope.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "import": "./dist/store.js"
+    },
+    "./replication": {
+      "types": "./dist/replication.d.ts",
+      "import": "./dist/replication.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "biome check src",
+    "lint:fix": "biome check --write src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "gate": "npm run lint && npm run typecheck && npm run test && npm run build && npm run check:dist && npm run check:lockfile-transport",
+    "check:dist": "node scripts/check-dist.mjs",
+    "check:lockfile-transport": "node scripts/check-lockfile-transport.mjs"
+  },
+  "dependencies": {
+    "@jeswr/fetch-rdf": "^0.1.0",
+    "@solid/object": "^0.6.0",
+    "n3": "^2.0.3"
+  },
+  "peerDependencies": {
+    "@rdfjs/types": "^2.0.1",
+    "rxdb": "^16.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@rdfjs/types": "^2.0.1",
+    "@types/n3": "^1.26.1",
+    "@types/node": "^20",
+    "rxdb": "^16.0.0",
+    "typescript": "^5",
+    "vitest": "^4.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
