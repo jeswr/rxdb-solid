@@ -450,3 +450,64 @@ describe("durability — an orphaned document (written but unindexed) is self-he
     expect(ids).toEqual(["fresh", "orphan"]);
   });
 });
+
+describe("orphan sweep rejects invalid / corrupt resources (round-3 finding)", () => {
+  it("does not promote a corrupt-body or non-canonical doc.*.json into the index, and pull stays robust", async () => {
+    const pod = makePod(CONTAINER);
+    const store = new SolidDocStore({ container: CONTAINER, fetch: pod.fetchImpl });
+
+    // (a) A CORRUPT body at a canonical document name (would throw on JSON.parse).
+    const corruptName = keyToResourceName("corrupt");
+    await store.putDoc(corruptName, "this is not json", "application/json");
+    // (b) A FOREIGN/odd resource whose name is a VALID IRI and passes the listing
+    // prefix/suffix filter but is NOT a canonical encoding — `~` is a legal URL
+    // path char that `keyToResourceName` never emits, so `resourceNameToKey`
+    // rejects it. (Injected directly into the backing store.)
+    const foreignName = "doc.a~b.json";
+    pod.store.set(`${CONTAINER}${foreignName}`, {
+      body: new TextEncoder().encode('{"v":1,"doc":{"id":"x","_deleted":false}}'),
+      contentType: "application/json",
+      etag: '"z"',
+    });
+
+    // A normal push triggers the orphan sweep.
+    const c1 = await makeCollection();
+    await c1.insert({ id: "good", title: "Good", n: 1 });
+    await replicateOnce(c1, pod);
+
+    // Neither invalid resource was promoted into the index.
+    const meta = JSON.parse((await store.getDoc("meta.json"))?.body ?? "{}") as {
+      index: Record<string, number>;
+    };
+    expect(meta.index[corruptName]).toBeUndefined();
+    expect(meta.index[foreignName]).toBeUndefined();
+    // The good document IS indexed.
+    expect(typeof meta.index[keyToResourceName("good")]).toBe("number");
+
+    // A fresh consumer pulls ONLY the good document — the corrupt/foreign
+    // resources neither appear nor break the pull.
+    const c2 = await makeCollection();
+    await replicateOnce(c2, pod);
+    const ids = (await c2.find().exec()).map((d) => d.id);
+    expect(ids).toEqual(["good"]);
+  });
+
+  it("a corrupt body that somehow IS in the index does not break the pull (defence in depth)", async () => {
+    const pod = makePod(CONTAINER);
+    // Seed a real doc + meta via a push.
+    const c1 = await makeCollection();
+    await c1.insert({ id: "ok", title: "OK", n: 1 });
+    await replicateOnce(c1, pod);
+    // Now CORRUPT the stored body of an indexed document directly.
+    const okUrl = CONTAINER + keyToResourceName("ok");
+    pod.store.set(okUrl, {
+      body: new TextEncoder().encode("}{ broken"),
+      contentType: "application/json",
+      etag: '"corrupt"',
+    });
+    // The pull skips the unreadable document instead of throwing.
+    const c2 = await makeCollection();
+    await expect(replicateOnce(c2, pod)).resolves.toBeDefined();
+    expect((await c2.find().exec()).map((d) => d.id)).toEqual([]);
+  });
+});

@@ -227,17 +227,48 @@ export function replicateSolid<RxDocType>(
 
   /**
    * Read the document master state for `resourceName` (with its ETag for an
-   * optimistic write), or null if absent.
+   * optimistic write). Returns `null` if the resource is absent OR cannot be
+   * deserialised (a corrupt / foreign body) — a parse error never escapes, so a
+   * single bad resource can never break a whole pull/push. The push treats an
+   * unreadable existing resource as a conflict (it will not clobber it).
    */
   async function readDoc(
     resourceName: string,
   ): Promise<{ doc: WithDeleted<RxDocType>; etag: string | null } | null> {
     const fetched = await store.getDoc(resourceName);
     if (!fetched) return null;
-    const doc = options.fromRdf
-      ? options.fromRdf(fetched.body, fetched.contentType)
-      : (JSON.parse(fetched.body) as JsonEnvelope<RxDocType>).doc;
-    return { doc, etag: fetched.etag };
+    try {
+      const doc = options.fromRdf
+        ? options.fromRdf(fetched.body, fetched.contentType)
+        : (JSON.parse(fetched.body) as JsonEnvelope<RxDocType>).doc;
+      // A JSON envelope must actually carry a `doc` object; reject a shape that
+      // parsed but is not one of ours.
+      if (doc === null || typeof doc !== "object") return null;
+      return { doc, etag: fetched.etag };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * True iff `resourceName` is a USABLE managed document: its name decodes to a
+   * key whose canonical resource name round-trips (so a foreign / odd
+   * `doc.*.json` is excluded), AND its body deserialises. Used to gate orphan
+   * re-indexing so an unmanaged or corrupt resource is never promoted into the
+   * pull index.
+   */
+  async function isUsableDoc(resourceName: string): Promise<boolean> {
+    let key: string;
+    try {
+      key = resourceNameToKey(resourceName);
+    } catch {
+      return false;
+    }
+    // The canonical encoding of the decoded key must equal the resource name —
+    // rejects any non-canonical / ambiguous name a foreign tool may have minted.
+    if (keyToResourceName(key) !== resourceName) return false;
+    // The body must deserialise to a doc we can replicate.
+    return (await readDoc(resourceName)) !== null;
   }
 
   /** Serialise the document master state to its on-pod body + content type. */
@@ -443,13 +474,21 @@ export function replicateSolid<RxDocType>(
 
       // Find orphans: document resources that exist on the pod but are missing
       // from the (fresh) index. Best-effort — never let a listing error abort the
-      // commit of our own `written` entries.
+      // commit of our own `written` entries. CRITICALLY, only re-index an orphan
+      // we can actually USE: its name must decode to a key whose canonical
+      // resource name round-trips (so a foreign/odd `doc.*.json` is not promoted),
+      // AND its body must deserialise (so a corrupt body never enters the index
+      // and breaks a later pull). An unusable resource is left out — it stayed
+      // invisible before and stays invisible now.
       let orphans: string[] = [];
       try {
         const urls = await store.listDocUrls();
-        orphans = urls
+        const candidates = urls
           .map((u) => store.urlToResourceName(u))
           .filter((name) => typeof meta.index[name] !== "number" && !written.includes(name));
+        for (const name of candidates) {
+          if (await isUsableDoc(name)) orphans.push(name);
+        }
       } catch {
         orphans = [];
       }
