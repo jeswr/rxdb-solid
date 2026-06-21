@@ -511,3 +511,56 @@ describe("orphan sweep rejects invalid / corrupt resources (round-3 finding)", (
     expect((await c2.find().exec()).map((d) => d.id)).toEqual([]);
   });
 });
+
+describe("round-4 hardening — key/resource consistency + no pull stall", () => {
+  it("does not promote a canonical resource whose body's primary key mismatches the name", async () => {
+    const pod = makePod(CONTAINER);
+    const store = new SolidDocStore({ container: CONTAINER, fetch: pod.fetchImpl });
+    // A canonical-looking resource doc.a.json whose BODY claims id "b" — a foreign
+    // / inconsistent resource that must NOT be promoted (it would otherwise be
+    // pulled under the wrong checkpoint key).
+    const aName = keyToResourceName("a");
+    const mismatched = withDeleted({ id: "b", title: "B", n: 1 }, false);
+    await store.putDoc(aName, JSON.stringify({ v: 1, doc: mismatched }), "application/json");
+
+    const c1 = await makeCollection();
+    await c1.insert({ id: "good", title: "Good", n: 1 });
+    await replicateOnce(c1, pod);
+
+    const meta = JSON.parse((await store.getDoc("meta.json"))?.body ?? "{}") as {
+      index: Record<string, number>;
+    };
+    // The mismatched resource was NOT indexed.
+    expect(meta.index[aName]).toBeUndefined();
+
+    const c2 = await makeCollection();
+    await replicateOnce(c2, pod);
+    expect((await c2.find().exec()).map((d) => d.id)).toEqual(["good"]);
+  });
+
+  it("a corrupt indexed document preceding a valid one does not stall the pull", async () => {
+    const pod = makePod(CONTAINER);
+
+    // Push two real docs so BOTH are indexed (early < later by updatedAt).
+    const c1 = await makeCollection();
+    await c1.insert({ id: "early", title: "Early", n: 1 });
+    await c1.insert({ id: "later", title: "Later", n: 2 });
+    await replicateOnce(c1, pod);
+
+    // Corrupt the EARLIER indexed document's body in place.
+    pod.store.set(CONTAINER + keyToResourceName("early"), {
+      body: new TextEncoder().encode("not json at all"),
+      contentType: "application/json",
+      etag: '"x"',
+    });
+
+    // With batchSize 1, a naive pull that did not advance past the unreadable
+    // earlier entry would loop forever on it and never reach "later". Assert the
+    // pull reaches "later" (forward progress past the corrupt entry).
+    const c2 = await makeCollection();
+    await replicateOnce(c2, pod, { batchSize: 1 });
+    const ids = (await c2.find().exec()).map((d) => d.id);
+    expect(ids).toContain("later");
+    expect(ids).not.toContain("early"); // the corrupt earlier doc is skipped, not fatal
+  });
+});

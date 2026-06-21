@@ -194,8 +194,16 @@ export function replicateSolid(options) {
         // rejects any non-canonical / ambiguous name a foreign tool may have minted.
         if (keyToResourceName(key) !== resourceName)
             return false;
-        // The body must deserialise to a doc we can replicate.
-        return (await readDoc(resourceName)) !== null;
+        // The body must deserialise to a doc we can replicate…
+        const read = await readDoc(resourceName);
+        if (read === null)
+            return false;
+        // …AND the document's OWN primary key must map back to THIS resource name.
+        // Otherwise a foreign `doc.a.json` whose body says `{ id: "b" }` would be
+        // promoted and later pulled under the wrong checkpoint key — reject the
+        // mismatch so only self-consistent documents enter the index.
+        const docKey = String(read.doc[primaryPath]);
+        return keyToResourceName(docKey) === resourceName;
     }
     /** Serialise the document master state to its on-pod body + content type. */
     function serializeDoc(doc) {
@@ -276,15 +284,24 @@ export function replicateSolid(options) {
         const after = checkpoint
             ? candidates.filter((c) => compareCheckpoint({ id: c.key, updatedAt: c.updatedAt }, checkpoint) > 0)
             : candidates;
-        const batch = after.slice(0, limit);
+        // Collect up to `limit` READABLE documents, scanning BEYOND the initial slice
+        // when entries are skipped, and ALWAYS advancing the checkpoint past every
+        // candidate we process (readable or not). This guarantees forward progress:
+        // a batch of only corrupt/unreadable indexed entries still advances the
+        // checkpoint, so later valid documents are eventually reached (no stall).
         const documents = [];
         let next = checkpoint;
-        for (const c of batch) {
+        for (const c of after) {
+            if (documents.length >= limit)
+                break;
+            const candidateCp = { id: c.key, updatedAt: c.updatedAt };
             const read = await readDoc(c.name);
+            // Advance the checkpoint to this candidate regardless of readability — a
+            // skipped (raced-away / unreadable) entry must not pin the checkpoint.
+            next = candidateCp;
             if (!read)
-                continue; // Raced away between listing + read; skip.
+                continue;
             documents.push(read.doc);
-            next = { id: c.key, updatedAt: c.updatedAt };
         }
         return { checkpoint: next, documents };
     }
