@@ -81,7 +81,11 @@ export function assertWithinBase(
   // is the slash-terminated base sans the trailing slash (i.e. `/notes/my-doc/`
   // → root path `/notes/my-doc/`; `/notes/my-doc` → root path `/notes/my-doc/`).
   const basePath = b.pathname.endsWith("/") ? b.pathname : `${b.pathname}/`;
-  const isRoot = u.pathname === basePath;
+  // The root may be addressed EITHER slash-terminated (`/notes/my-doc/`) OR, when
+  // the caller passed a non-normalised container, in the exact same non-slash
+  // form (`/notes/my-doc`). Treat both as the root so `{ allowRoot: true }` on a
+  // non-normalised container is honoured rather than mis-flagged as an escape.
+  const isRoot = u.pathname === basePath || u.pathname === b.pathname;
   // A strict descendant has the slash-terminated base as a prefix AND is not the
   // root itself; the root is matched exactly (above) and gated below.
   if (!isRoot && !u.pathname.startsWith(basePath)) {

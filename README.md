@@ -169,6 +169,13 @@ const { items } = await db.addCollections({
   (Fallback: against a server that returns **no** ETag, an optimistic update is impossible, so the
   document write degrades to a best-effort overwrite — the suite's servers all return ETags.)
 
+- **Orphan self-healing (partial-write durability).** A document body is written *before* its
+  metadata index entry, so a crash or an exhausted meta-commit retry could leave a document on the
+  pod with no index entry — invisible to pulls. Every metadata commit therefore also **re-indexes
+  any document resource present in the container listing but absent from the index**, so the next
+  push (or the same push's retry) recovers any orphan. The sweep is best-effort: a listing error
+  never blocks committing the current push's own entries.
+
 ## Security: a fail-closed scope guard
 
 Every URL the store reads, writes, or deletes is asserted to lie **under the configured container**

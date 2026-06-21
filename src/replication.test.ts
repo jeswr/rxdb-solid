@@ -415,3 +415,38 @@ describe("concurrency — the conditional write closes the read-then-write race 
     expect(typeof JSON.parse(afterBody ?? "{}").doc.n).toBe("number");
   });
 });
+
+describe("durability — an orphaned document (written but unindexed) is self-healed (Finding B)", () => {
+  it("re-indexes a document present on the pod but missing from the metadata index", async () => {
+    const pod = makePod(CONTAINER);
+    const store = new SolidDocStore({ container: CONTAINER, fetch: pod.fetchImpl });
+
+    // Simulate a PARTIAL write: a document body lands on the pod, but the meta
+    // commit never happened (e.g. a crash / exhausted retry) so it has no index
+    // entry. Such an orphan would be invisible to pulls without reconciliation.
+    const orphanName = keyToResourceName("orphan");
+    const orphanDoc = withDeleted({ id: "orphan", title: "Orphan", n: 9 }, false);
+    await store.putDoc(orphanName, JSON.stringify({ v: 1, doc: orphanDoc }), "application/json");
+    // Confirm it is genuinely orphaned: present on the pod, absent from meta.
+    expect(await store.getDoc(orphanName)).not.toBeNull();
+    expect(await store.getDoc("meta.json")).toBeNull(); // no meta written yet
+
+    // A normal push of an UNRELATED document triggers a meta commit, which sweeps
+    // and re-indexes the orphan.
+    const c1 = await makeCollection();
+    await c1.insert({ id: "fresh", title: "Fresh", n: 1 });
+    await replicateOnce(c1, pod);
+
+    // The orphan now has an index entry…
+    const meta = JSON.parse((await store.getDoc("meta.json"))?.body ?? "{}") as {
+      index: Record<string, number>;
+    };
+    expect(typeof meta.index[orphanName]).toBe("number");
+
+    // …so a fresh consumer pulls BOTH the orphan and the fresh document.
+    const c2 = await makeCollection();
+    await replicateOnce(c2, pod);
+    const ids = (await c2.find().exec()).map((d) => d.id).sort();
+    expect(ids).toEqual(["fresh", "orphan"]);
+  });
+});

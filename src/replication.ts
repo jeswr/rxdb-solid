@@ -427,13 +427,40 @@ export function replicateSolid<RxDocType>(
    * pending names against the fresh monotonic counter, and re-writes with the
    * fresh ETag; a precondition failure just loops. Bounded so a pathological
    * server can't spin forever.
+   *
+   * **Orphan reconciliation (Finding B durability).** A document body is written
+   * BEFORE its index entry, so a prior crash / exhausted-retry meta commit could
+   * leave a document on the pod with NO index entry, invisible to pulls. To make
+   * a partial write self-healing, every commit also re-indexes any document
+   * resource present in the container LISTING but absent from the fresh index —
+   * so the very next push (or this push's retry) recovers any orphan. The orphan
+   * sweep is best-effort: a listing failure does not block committing `written`.
    */
   async function commitMetaIndex(written: readonly string[]): Promise<void> {
     const MaxAttempts = 10;
     for (let attempt = 0; attempt < MaxAttempts; attempt++) {
       const { meta, etag } = await readMeta();
-      // Re-stamp our written names from the FRESH counter, preserving the order
-      // they were written in this push (so their relative pull order is stable).
+
+      // Find orphans: document resources that exist on the pod but are missing
+      // from the (fresh) index. Best-effort — never let a listing error abort the
+      // commit of our own `written` entries.
+      let orphans: string[] = [];
+      try {
+        const urls = await store.listDocUrls();
+        orphans = urls
+          .map((u) => store.urlToResourceName(u))
+          .filter((name) => typeof meta.index[name] !== "number" && !written.includes(name));
+      } catch {
+        orphans = [];
+      }
+
+      // Stamp orphans first, then our written names, from the FRESH counter — both
+      // get a strictly-increasing updatedAt so they become pull-discoverable.
+      // (Deterministic order: orphans sorted, then the written order.)
+      for (const name of [...orphans].sort()) {
+        meta.counter += 1;
+        meta.index[name] = meta.counter;
+      }
       for (const name of written) {
         meta.counter += 1;
         meta.index[name] = meta.counter;

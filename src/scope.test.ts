@@ -91,6 +91,19 @@ describe("assertWithinBase", () => {
       assertWithinBase(raw, "https://alice.pod/notes/my-doc/", { allowRoot: true }),
     ).not.toThrow();
   });
+
+  it("honours allowRoot for BOTH root forms of a non-normalised container", () => {
+    // Regression for the round-2 finding: the EXACT non-slash container URL must
+    // be recognised as the root (not flagged as an escape), both gated by default
+    // and accepted with allowRoot.
+    const raw = "https://alice.pod/notes/my-doc"; // no trailing slash
+    // The exact same non-slash URL is the root → gated by default…
+    expect(() => assertWithinBase(raw, raw)).toThrow(/container root/);
+    // …and accepted with allowRoot (the listing case), NOT a path-escape error.
+    expect(() => assertWithinBase(raw, raw, { allowRoot: true })).not.toThrow();
+    // The slash form of the root is likewise both-ways handled.
+    expect(() => assertWithinBase(raw, `${raw}/`, { allowRoot: true })).not.toThrow();
+  });
 });
 
 describe("isContainerUrl", () => {
