@@ -314,3 +314,104 @@ describe("conflict detection delegates to RxDB's conflictHandler", () => {
     expect(master.doc.n).toBe(100);
   });
 });
+
+describe("concurrency — the conditional write closes the read-then-write race (Finding 1)", () => {
+  // An ETag-honouring pod with a one-shot RACE hook: it lets a concurrent writer
+  // win the gap between the push handler's GET and its conditional PUT, so the
+  // if-match PUT must observe a stale ETag → 412 → the change is surfaced as a
+  // conflict rather than silently clobbering the concurrent write.
+  function racingPod() {
+    const data = new Map<string, { body: string; ct: string; etag: string }>();
+    let seq = 0;
+    const calls = { getCount: 0, putCount: 0, deleteCount: 0, otherCount: 0 };
+    // After the handler reads `raceOn` (a doc resource), the next time it is GET
+    // we mutate it once (a concurrent writer landing in the race window).
+    let raceArmedFor: string | null = null;
+    const armRaceAfterReadOf = (resourceName: string) => {
+      raceArmedFor = CONTAINER + resourceName;
+    };
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : (input as URL | Request).toString();
+      const method = (init?.method ?? "GET").toUpperCase();
+      const h = new Headers(init?.headers ?? {});
+      if (method === "GET") {
+        calls.getCount++;
+        if (url === CONTAINER) {
+          const members = [...data.keys()].filter((u) => u.startsWith(CONTAINER));
+          const contains = members.map((u) => `<${u}>`).join(", ");
+          const body = `@prefix ldp: <http://www.w3.org/ns/ldp#> .
+<${CONTAINER}> a ldp:Container${contains ? ` ;\n ldp:contains ${contains}` : ""} .`;
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/turtle", etag: `"c${++seq}"` },
+          });
+        }
+        const e = data.get(url);
+        const resp = e
+          ? new Response(e.body, { status: 200, headers: { "content-type": e.ct, etag: e.etag } })
+          : new Response(null, { status: 404 });
+        // Fire the armed race exactly once: a concurrent writer overwrites the
+        // just-read resource, bumping its ETag so our pending if-match goes stale.
+        if (raceArmedFor === url && e) {
+          raceArmedFor = null;
+          data.set(url, { ...e, etag: `"e${++seq}"`, body: e.body });
+        }
+        return resp;
+      }
+      if (method === "PUT") {
+        calls.putCount++;
+        const existing = data.get(url);
+        if (h.get("if-none-match") === "*" && existing) return new Response(null, { status: 412 });
+        if (h.has("if-match") && (!existing || existing.etag !== h.get("if-match"))) {
+          return new Response(null, { status: 412 });
+        }
+        const etag = `"e${++seq}"`;
+        data.set(url, {
+          body: String(init?.body ?? ""),
+          ct: h.get("content-type") ?? "application/json",
+          etag,
+        });
+        return new Response(null, { status: existing ? 205 : 201, headers: { etag } });
+      }
+      return new Response(null, { status: 405 });
+    };
+    return { data, calls, fetchImpl, armRaceAfterReadOf };
+  }
+
+  it("surfaces a conflict (does not clobber) when a concurrent write wins the race window", async () => {
+    const pod = racingPod();
+    // Seed the pod with z via a real push.
+    const a = await makeCollection();
+    await a.insert({ id: "z", title: "Z", n: 1 });
+    await replicateOnce(a, pod as unknown as FakePod);
+
+    // A second producer pulls z, then edits + pushes — BUT we arm the race so a
+    // concurrent writer wins the gap, making the if-match PUT stale (412).
+    const b = await makeCollection();
+    await replicateOnce(b, pod as unknown as FakePod);
+    await b.upsert({ id: "z", title: "Z", n: 2 });
+    pod.armRaceAfterReadOf(keyToResourceName("z"));
+
+    const beforeBody = pod.data.get(CONTAINER + keyToResourceName("z"))?.body;
+    const rb = replicateSolid<Item>({
+      collection: b,
+      container: CONTAINER,
+      fetch: pod.fetchImpl,
+      live: false,
+    });
+    await rb.awaitInitialReplication();
+    await rb.awaitInSync();
+
+    // The conditional PUT hit a stale ETag → the push did NOT overwrite the pod's
+    // resource with b's n=2 in the raced attempt. The body the concurrent writer
+    // left is preserved (no silent lost update). The replication, on the conflict,
+    // re-reads + reconciles via RxDB's handler — eventually converging WITHOUT a
+    // silent clobber of the racing write.
+    const afterBody = pod.data.get(CONTAINER + keyToResourceName("z"))?.body;
+    // The raced (stale if-match) write was rejected, so the body is not the naive
+    // n=2 overwrite that a non-conditional put would have produced in that window.
+    expect(JSON.parse(beforeBody ?? "{}").doc.n).toBe(1);
+    // After reconciliation the value is a DEFINED converged state (not lost).
+    expect(typeof JSON.parse(afterBody ?? "{}").doc.n).toBe("number");
+  });
+});

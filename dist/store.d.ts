@@ -101,15 +101,31 @@ export declare class SolidDocStore {
     docUrl(key: string): string;
     /**
      * Overwrite-capable PUT of `body` to `${container}${resourceName}` with the
-     * given content type. Uses NO `if-none-match`, so an existing resource is
-     * replaced (the plugin owns conflict detection in the push handler, not here).
-     * Returns the resource URL + its new ETag (if the server reported one).
+     * given content type.
      *
-     * @throws if the target is outside the container, or on a non-ok response.
+     * **Concurrency control via an optional precondition.** Pass `ifMatch` to
+     * write only if the resource's current ETag matches (an OPTIMISTIC update), or
+     * `ifNoneMatch: "*"` to write only if the resource does NOT yet exist (an
+     * atomic CREATE). When the server rejects the precondition (HTTP 412), this
+     * returns `{ ok: false, precondition: "failed" }` rather than throwing, so the
+     * caller can re-read + reconcile (the lost-update / conflict path). With no
+     * precondition it is a plain overwrite.
+     *
+     * On success returns `{ ok: true, url, etag }` (the new ETag if reported).
+     *
+     * @throws if the target is outside the container, or on a non-ok response that
+     *   is NOT a precondition failure.
      */
-    putDoc(resourceName: string, body: string, contentType: string): Promise<{
+    putDoc(resourceName: string, body: string, contentType: string, opts?: {
+        ifMatch?: string;
+        ifNoneMatch?: string;
+    }): Promise<{
+        ok: true;
         url: string;
         etag: string | null;
+    } | {
+        ok: false;
+        precondition: "failed";
     }>;
     /**
      * GET a single resource. Returns `null` for a missing resource (404/410).

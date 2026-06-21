@@ -225,47 +225,74 @@ export function replicateSolid<RxDocType>(
   const primaryPath = collection.schema.primaryPath as keyof WithDeleted<RxDocType> & string;
   const replicationIdentifier = options.replicationIdentifier ?? `rxdb-solid:${store.container}`;
 
-  /** Read the document master state for `resourceName`, or null if absent. */
-  async function readDoc(resourceName: string): Promise<WithDeleted<RxDocType> | null> {
+  /**
+   * Read the document master state for `resourceName` (with its ETag for an
+   * optimistic write), or null if absent.
+   */
+  async function readDoc(
+    resourceName: string,
+  ): Promise<{ doc: WithDeleted<RxDocType>; etag: string | null } | null> {
     const fetched = await store.getDoc(resourceName);
     if (!fetched) return null;
-    if (options.fromRdf) {
-      return options.fromRdf(fetched.body, fetched.contentType);
-    }
-    const envelope = JSON.parse(fetched.body) as JsonEnvelope<RxDocType>;
-    return envelope.doc;
+    const doc = options.fromRdf
+      ? options.fromRdf(fetched.body, fetched.contentType)
+      : (JSON.parse(fetched.body) as JsonEnvelope<RxDocType>).doc;
+    return { doc, etag: fetched.etag };
   }
 
-  /** Serialise + PUT the document master state to its resource. */
-  async function writeDoc(resourceName: string, doc: WithDeleted<RxDocType>): Promise<void> {
-    if (options.toRdf) {
-      const { body, contentType } = options.toRdf(doc);
-      await store.putDoc(resourceName, body, contentType);
-      return;
-    }
+  /** Serialise the document master state to its on-pod body + content type. */
+  function serializeDoc(doc: WithDeleted<RxDocType>): { body: string; contentType: string } {
+    if (options.toRdf) return options.toRdf(doc);
     const envelope: JsonEnvelope<RxDocType> = { v: 1, doc };
-    await store.putDoc(resourceName, JSON.stringify(envelope), DOC_CONTENT_TYPE);
+    return { body: JSON.stringify(envelope), contentType: DOC_CONTENT_TYPE };
   }
 
-  /** Read the per-collection metadata resource (or the empty default). */
-  async function readMeta(): Promise<Meta> {
+  /**
+   * Conditionally write the document master state. `precondition` selects the
+   * concurrency guard: `"create"` (only if absent), or an `if-match` ETag (only
+   * if unchanged). Returns `true` on success, `false` on a precondition failure
+   * (a concurrent write — the caller treats it as a conflict).
+   */
+  async function writeDocConditional(
+    resourceName: string,
+    doc: WithDeleted<RxDocType>,
+    precondition: { create: true } | { ifMatch: string },
+  ): Promise<boolean> {
+    const { body, contentType } = serializeDoc(doc);
+    const opts =
+      "create" in precondition ? { ifNoneMatch: "*" } : { ifMatch: precondition.ifMatch };
+    const res = await store.putDoc(resourceName, body, contentType, opts);
+    return res.ok;
+  }
+
+  /**
+   * Unconditional overwrite — the fallback for a server that returns no ETag (so
+   * an optimistic `if-match` write is impossible). Always "succeeds" (returns
+   * true) on a non-error response. See the README concurrency note.
+   */
+  async function writeDocBestEffort(
+    resourceName: string,
+    doc: WithDeleted<RxDocType>,
+  ): Promise<boolean> {
+    const { body, contentType } = serializeDoc(doc);
+    const res = await store.putDoc(resourceName, body, contentType);
+    return res.ok;
+  }
+
+  /** Read the per-collection metadata resource (with its ETag) or the empty default. */
+  async function readMeta(): Promise<{ meta: Meta; etag: string | null }> {
     const fetched = await store.getDoc(META_RESOURCE_NAME);
-    if (!fetched) return { ...EMPTY_META, index: {} };
+    if (!fetched) return { meta: { ...EMPTY_META, index: {} }, etag: null };
     try {
       const parsed = JSON.parse(fetched.body) as Meta;
       if (parsed && parsed.v === 1 && typeof parsed.counter === "number" && parsed.index) {
-        return parsed;
+        return { meta: parsed, etag: fetched.etag };
       }
     } catch {
       // Corrupt/foreign metadata — start fresh rather than throw (the index is
       // bookkeeping; a fresh index re-derives ordering from the next writes).
     }
-    return { ...EMPTY_META, index: {} };
-  }
-
-  /** Write the per-collection metadata resource. */
-  async function writeMeta(meta: Meta): Promise<void> {
-    await store.putDoc(META_RESOURCE_NAME, JSON.stringify(meta), DOC_CONTENT_TYPE);
+    return { meta: { ...EMPTY_META, index: {} }, etag: fetched.etag };
   }
 
   /**
@@ -277,7 +304,7 @@ export function replicateSolid<RxDocType>(
     checkpoint: SolidCheckpoint | undefined,
     limit: number,
   ): Promise<{ checkpoint: SolidCheckpoint | undefined; documents: WithDeleted<RxDocType>[] }> {
-    const meta = await readMeta();
+    const { meta } = await readMeta();
     // Candidate document resources = the listing intersected with the metadata
     // index (the index is the authority on updatedAt; the listing confirms the
     // resource still exists). A resource in the listing but missing from the
@@ -313,9 +340,9 @@ export function replicateSolid<RxDocType>(
     const documents: WithDeleted<RxDocType>[] = [];
     let next: SolidCheckpoint | undefined = checkpoint;
     for (const c of batch) {
-      const doc = await readDoc(c.name);
-      if (!doc) continue; // Raced away between listing + read; skip.
-      documents.push(doc);
+      const read = await readDoc(c.name);
+      if (!read) continue; // Raced away between listing + read; skip.
+      documents.push(read.doc);
       next = { id: c.key, updatedAt: c.updatedAt };
     }
     return { checkpoint: next, documents };
@@ -323,8 +350,12 @@ export function replicateSolid<RxDocType>(
 
   /**
    * PUSH handler: for each fork write row, detect a conflict against the pod's
-   * current master state; on no conflict, write the document (tombstone for a
-   * deletion) and bump the metadata index. Returns the real master state for any
+   * current master state; on no conflict, write the document with a CONDITIONAL
+   * write (atomic create / `if-match` ETag) so a concurrent writer can never be
+   * silently clobbered — a precondition failure is treated as a conflict. Then
+   * record the written resource names and apply them to the metadata index under
+   * a conditional, retried `if-match` write (so concurrent pushes can never lose
+   * each other's index entries). Returns the real master state for every
    * conflicting row (RxDB then runs the collection's `conflictHandler`).
    */
   async function pushHandler(
@@ -334,9 +365,10 @@ export function replicateSolid<RxDocType>(
     }[],
   ): Promise<WithDeleted<RxDocType>[]> {
     const conflicts: WithDeleted<RxDocType>[] = [];
-    // Read the metadata once, mutate locally, write once at the end (fewer pod
-    // round-trips; the writes within a single push are serialised here).
-    const meta = await readMeta();
+    // Resource names whose document body we successfully (re)wrote in this push;
+    // their metadata index entries are reconciled together afterwards.
+    const written: string[] = [];
+
     for (const row of rows) {
       const key = String(row.newDocumentState[primaryPath]);
       const resourceName = keyToResourceName(key);
@@ -346,28 +378,82 @@ export function replicateSolid<RxDocType>(
       // assumed. (No assumedMasterState ⇒ the fork believes this is a fresh
       // insert; then any existing pod state is a conflict.)
       const assumed = row.assumedMasterState;
-      const conflict = assumed
-        ? current === null || !deepEqual(stripDoc(current), stripDoc(assumed))
+      const isConflict = assumed
+        ? current === null || !deepEqual(stripDoc(current.doc), stripDoc(assumed))
         : current !== null;
-      if (conflict) {
-        if (current !== null) {
-          conflicts.push(current);
-        } else {
-          // The fork assumed a master that the pod no longer has (deleted out
-          // from under it). Surface a tombstone of the assumed state so RxDB's
-          // conflict handler can reconcile against a real `WithDeleted` value.
-          conflicts.push(asTombstone(assumed as WithDeleted<RxDocType>));
-        }
+      if (isConflict) {
+        conflicts.push(
+          current !== null
+            ? current.doc
+            : // The fork assumed a master the pod no longer has (deleted out from
+              // under it). Surface a tombstone so RxDB reconciles against a real
+              // `WithDeleted` value.
+              asTombstone(assumed as WithDeleted<RxDocType>),
+        );
         continue;
       }
 
-      // No conflict — write the new master state (tombstone when _deleted).
-      await writeDoc(resourceName, row.newDocumentState);
-      meta.counter += 1;
-      meta.index[resourceName] = meta.counter;
+      // No conflict by the assumed-state check — write CONDITIONALLY so a write
+      // that raced in AFTER our read (same ETag window) cannot be clobbered.
+      // create ⇒ if-none-match:* ; update ⇒ if-match:<etag>. If the server gave
+      // no ETag (rare; the suite's servers all do), an optimistic update is not
+      // possible, so we fall back to a best-effort overwrite — documented in the
+      // README's concurrency note.
+      const ok = await (current === null
+        ? writeDocConditional(resourceName, row.newDocumentState, { create: true })
+        : current.etag
+          ? writeDocConditional(resourceName, row.newDocumentState, { ifMatch: current.etag })
+          : writeDocBestEffort(resourceName, row.newDocumentState));
+      if (!ok) {
+        // The precondition failed — another client wrote concurrently. Re-read
+        // the now-current master and surface it as a conflict for RxDB to resolve.
+        const fresh = await readDoc(resourceName);
+        conflicts.push(fresh !== null ? fresh.doc : asTombstone(row.newDocumentState));
+        continue;
+      }
+      written.push(resourceName);
     }
-    await writeMeta(meta);
+
+    if (written.length > 0) {
+      await commitMetaIndex(written);
+    }
     return conflicts;
+  }
+
+  /**
+   * Apply `written` resource names to the metadata index under a conditional,
+   * retried `if-match` write so concurrent pushes never lose each other's index
+   * entries (Finding 2). Each retry re-reads the fresh meta, re-applies our
+   * pending names against the fresh monotonic counter, and re-writes with the
+   * fresh ETag; a precondition failure just loops. Bounded so a pathological
+   * server can't spin forever.
+   */
+  async function commitMetaIndex(written: readonly string[]): Promise<void> {
+    const MaxAttempts = 10;
+    for (let attempt = 0; attempt < MaxAttempts; attempt++) {
+      const { meta, etag } = await readMeta();
+      // Re-stamp our written names from the FRESH counter, preserving the order
+      // they were written in this push (so their relative pull order is stable).
+      for (const name of written) {
+        meta.counter += 1;
+        meta.index[name] = meta.counter;
+      }
+      const body = JSON.stringify(meta);
+      const res = await store.putDoc(
+        META_RESOURCE_NAME,
+        body,
+        DOC_CONTENT_TYPE,
+        // Create atomically if the meta did not exist; otherwise require the ETag
+        // we just read — a concurrent meta write fails the precondition + retries.
+        etag === null ? { ifNoneMatch: "*" } : { ifMatch: etag },
+      );
+      if (res.ok) return;
+      // Precondition failed — a concurrent push updated meta. Loop to re-read +
+      // re-apply our names against the now-fresh counter.
+    }
+    throw new Error(
+      "[rxdb-solid] failed to commit the metadata index after repeated concurrent updates",
+    );
   }
 
   return replicateRxCollection<RxDocType, SolidCheckpoint>({

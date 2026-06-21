@@ -158,6 +158,17 @@ const { items } = await db.addCollections({
   master for any conflicting row. RxDB then invokes the collection's `conflictHandler`. This plugin
   never picks a winner, and a stale fork write never clobbers a newer pod state.
 
+- **Conditional writes close the read-then-write race.** Detection alone has a TOCTOU window: a
+  concurrent client could write *between* the handler's read and its write. So every document write
+  is **conditional** — an atomic create (`If-None-Match: *`) for a new resource, or an optimistic
+  update (`If-Match: <etag>`) for an existing one. A precondition failure (HTTP 412) is treated as a
+  conflict: the handler re-reads the now-current master and returns it for RxDB to resolve, so a
+  concurrent write is never silently lost. The shared metadata resource is likewise written with a
+  conditional, **retried** `If-Match` (re-reading + re-applying this push's index entries against the
+  fresh monotonic counter on a 412), so concurrent pushes can never lose each other's index entries.
+  (Fallback: against a server that returns **no** ETag, an optimistic update is impossible, so the
+  document write degrades to a best-effort overwrite — the suite's servers all return ETags.)
+
 ## Security: a fail-closed scope guard
 
 Every URL the store reads, writes, or deletes is asserted to lie **under the configured container**

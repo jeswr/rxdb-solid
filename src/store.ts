@@ -193,27 +193,43 @@ export class SolidDocStore {
 
   /**
    * Overwrite-capable PUT of `body` to `${container}${resourceName}` with the
-   * given content type. Uses NO `if-none-match`, so an existing resource is
-   * replaced (the plugin owns conflict detection in the push handler, not here).
-   * Returns the resource URL + its new ETag (if the server reported one).
+   * given content type.
    *
-   * @throws if the target is outside the container, or on a non-ok response.
+   * **Concurrency control via an optional precondition.** Pass `ifMatch` to
+   * write only if the resource's current ETag matches (an OPTIMISTIC update), or
+   * `ifNoneMatch: "*"` to write only if the resource does NOT yet exist (an
+   * atomic CREATE). When the server rejects the precondition (HTTP 412), this
+   * returns `{ ok: false, precondition: "failed" }` rather than throwing, so the
+   * caller can re-read + reconcile (the lost-update / conflict path). With no
+   * precondition it is a plain overwrite.
+   *
+   * On success returns `{ ok: true, url, etag }` (the new ETag if reported).
+   *
+   * @throws if the target is outside the container, or on a non-ok response that
+   *   is NOT a precondition failure.
    */
   async putDoc(
     resourceName: string,
     body: string,
     contentType: string,
-  ): Promise<{ url: string; etag: string | null }> {
+    opts?: { ifMatch?: string; ifNoneMatch?: string },
+  ): Promise<
+    { ok: true; url: string; etag: string | null } | { ok: false; precondition: "failed" }
+  > {
     const url = this.resourceUrl(resourceName);
-    const res = await this.fetch(url, {
-      method: "PUT",
-      headers: { "content-type": contentType },
-      body,
-    });
+    const headers: Record<string, string> = { "content-type": contentType };
+    if (opts?.ifMatch) headers["if-match"] = opts.ifMatch;
+    if (opts?.ifNoneMatch) headers["if-none-match"] = opts.ifNoneMatch;
+    const res = await this.fetch(url, { method: "PUT", headers, body });
+    // 412 Precondition Failed (and 428 Precondition Required) are the concurrency
+    // signal, not a hard error — let the caller reconcile.
+    if (res.status === 412 || res.status === 428) {
+      return { ok: false, precondition: "failed" };
+    }
     if (!res.ok) {
       throw new Error(`[rxdb-solid] putDoc ${url} failed: ${res.status} ${res.statusText}`);
     }
-    return { url, etag: res.headers.get("etag") };
+    return { ok: true, url, etag: res.headers.get("etag") };
   }
 
   /**

@@ -74,17 +74,25 @@ export function assertWithinBase(
       `[rxdb-solid] target URL ${url} escapes container origin ${b.origin} (refused)`,
     );
   }
-  if (!u.pathname.startsWith(b.pathname)) {
-    throw new Error(
-      `[rxdb-solid] target URL ${url} escapes container path ${b.pathname} (refused)`,
-    );
+  // Do NOT assume `container` is trailing-slash-normalised — this is a PUBLIC
+  // export. Derive a slash-terminated base path so the prefix check has an exact
+  // BOUNDARY at the container directory: a sibling like `/notes/my-doc-evil/`
+  // must never pass for the container `/notes/my-doc`. The container ROOT itself
+  // is the slash-terminated base sans the trailing slash (i.e. `/notes/my-doc/`
+  // → root path `/notes/my-doc/`; `/notes/my-doc` → root path `/notes/my-doc/`).
+  const basePath = b.pathname.endsWith("/") ? b.pathname : `${b.pathname}/`;
+  const isRoot = u.pathname === basePath;
+  // A strict descendant has the slash-terminated base as a prefix AND is not the
+  // root itself; the root is matched exactly (above) and gated below.
+  if (!isRoot && !u.pathname.startsWith(basePath)) {
+    throw new Error(`[rxdb-solid] target URL ${url} escapes container path ${basePath} (refused)`);
   }
   // Reject the container ROOT itself for resource access — it is not a managed
   // document resource, and acting on it (PUT/DELETE/GET) would target the
-  // container document. Compare on the normalised path+origin (ignoring any
+  // container document. Compare on the normalised path (ignoring any
   // query/fragment, which a target never carries) so trailing-slash / `?`/`#`
   // variants of the root cannot slip through.
-  if (opts?.allowRoot !== true && u.origin === b.origin && u.pathname === b.pathname) {
+  if (opts?.allowRoot !== true && isRoot) {
     throw new Error(
       `[rxdb-solid] target URL ${url} is the container root, not a managed resource (refused)`,
     );

@@ -69,6 +69,28 @@ describe("assertWithinBase", () => {
   it("REJECTS an invalid target URL", () => {
     expect(() => assertWithinBase(CONTAINER, "not a url")).toThrow(/invalid/);
   });
+
+  it("enforces a path BOUNDARY even for a NON-normalised container (no trailing slash)", () => {
+    // Regression for the roborev finding: `assertWithinBase` is a public export
+    // and must not assume the container is trailing-slash-normalised. A sibling
+    // that merely shares a path PREFIX must still be rejected.
+    const raw = "https://alice.pod/notes/my-doc"; // no trailing slash
+    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-doc-evil/u")).toThrow(
+      /escapes container path/,
+    );
+    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-docX")).toThrow(
+      /escapes container path/,
+    );
+    // A genuine descendant still passes (boundary is at the directory).
+    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-doc/u")).not.toThrow();
+    // The root (with or without the slash the caller omitted) is still gated.
+    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-doc/")).toThrow(
+      /container root/,
+    );
+    expect(() =>
+      assertWithinBase(raw, "https://alice.pod/notes/my-doc/", { allowRoot: true }),
+    ).not.toThrow();
+  });
 });
 
 describe("isContainerUrl", () => {
