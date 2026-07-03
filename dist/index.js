@@ -26,5 +26,5 @@
  */
 export { replicateSolid, } from "./replication.js";
 export { assertWithinBase, isContainerUrl, normalizeContainer } from "./scope.js";
-export { DOC_CONTENT_TYPE, keyToResourceName, META_RESOURCE_NAME, resourceNameToKey, SolidDocStore, } from "./store.js";
+export { DEFAULT_MAX_RESPONSE_BYTES, DOC_CONTENT_TYPE, keyToResourceName, META_RESOURCE_NAME, resourceNameToKey, SolidDocStore, } from "./store.js";
 //# sourceMappingURL=index.js.map

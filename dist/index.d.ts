@@ -25,5 +25,5 @@
  */
 export { type RdfSerialization, replicateSolid, type SolidCheckpoint, type SolidReplicationOptions, } from "./replication.js";
 export { assertWithinBase, isContainerUrl, normalizeContainer } from "./scope.js";
-export { DOC_CONTENT_TYPE, type FetchedDoc, keyToResourceName, META_RESOURCE_NAME, resourceNameToKey, SolidDocStore, type SolidDocStoreOptions, } from "./store.js";
+export { DEFAULT_MAX_RESPONSE_BYTES, DOC_CONTENT_TYPE, type FetchedDoc, keyToResourceName, META_RESOURCE_NAME, resourceNameToKey, SolidDocStore, type SolidDocStoreOptions, } from "./store.js";
 //# sourceMappingURL=index.d.ts.map

@@ -33,6 +33,7 @@ export {
 } from "./replication.js";
 export { assertWithinBase, isContainerUrl, normalizeContainer } from "./scope.js";
 export {
+  DEFAULT_MAX_RESPONSE_BYTES,
   DOC_CONTENT_TYPE,
   type FetchedDoc,
   keyToResourceName,

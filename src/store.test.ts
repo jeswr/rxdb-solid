@@ -1,12 +1,14 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { assertWithinBase } from "./scope.js";
 import {
+  DEFAULT_MAX_RESPONSE_BYTES,
   DOC_CONTENT_TYPE,
   keyToResourceName,
   META_RESOURCE_NAME,
+  resolveMaxResponseBytes,
   resourceNameToKey,
   SolidDocStore,
 } from "./store.js";
@@ -238,6 +240,277 @@ describe("the scope guard is enforced on every op (SSRF backstop)", () => {
   it("rejects a nested (non-direct-child) URL", () => {
     const { store } = makeStore();
     expect(() => store.urlToResourceName(`${CONTAINER}sub/x`)).toThrow(/direct child/);
+  });
+});
+
+describe("redirect refusal on credentialed requests (SSRF / credential-exfil guard)", () => {
+  // A credentialed request must NEVER be followed to another Location: the auth
+  // header / DPoP proof could be replayed to a foreign origin. Every request is
+  // issued with `redirect: "manual"` and any 3xx / opaqueredirect is refused.
+
+  it("issues every request with redirect:'manual'", async () => {
+    const seen: (RequestInit | undefined)[] = [];
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      seen.push(init);
+      const url = typeof input === "string" ? input : (input as URL | Request).toString();
+      if (url === CONTAINER) {
+        return new Response(
+          `@prefix ldp: <http://www.w3.org/ns/ldp#> .\n<${CONTAINER}> a ldp:Container .`,
+          { status: 200, headers: { "content-type": "text/turtle" } },
+        );
+      }
+      return new Response("{}", { status: 200, headers: { "content-type": DOC_CONTENT_TYPE } });
+    };
+    const store = new SolidDocStore({ container: CONTAINER, fetch: fetchImpl });
+    await store.getDoc(keyToResourceName("a"));
+    await store.putDoc(keyToResourceName("a"), "{}", DOC_CONTENT_TYPE);
+    await store.deleteDoc(keyToResourceName("a"));
+    await store.listDocUrls();
+    expect(seen).toHaveLength(4);
+    expect(seen.every((i) => i?.redirect === "manual")).toBe(true);
+  });
+
+  it("getDoc refuses a 3xx redirect", async () => {
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response(null, { status: 302, headers: { location: "https://evil.example/x" } });
+    const store = new SolidDocStore({ container: CONTAINER, fetch: fetchImpl });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(
+      /refusing to follow a redirect/,
+    );
+  });
+
+  it("putDoc refuses a 3xx redirect", async () => {
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response(null, { status: 301, headers: { location: "https://evil.example/x" } });
+    const store = new SolidDocStore({ container: CONTAINER, fetch: fetchImpl });
+    await expect(store.putDoc(keyToResourceName("a"), "{}", DOC_CONTENT_TYPE)).rejects.toThrow(
+      /refusing to follow a redirect/,
+    );
+  });
+
+  it("deleteDoc refuses a 3xx redirect", async () => {
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response(null, { status: 307, headers: { location: "https://evil.example/x" } });
+    const store = new SolidDocStore({ container: CONTAINER, fetch: fetchImpl });
+    await expect(store.deleteDoc(keyToResourceName("a"))).rejects.toThrow(
+      /refusing to follow a redirect/,
+    );
+  });
+
+  it("listDocUrls refuses a 3xx redirect on the container GET", async () => {
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response(null, { status: 308, headers: { location: "https://evil.example/" } });
+    const store = new SolidDocStore({ container: CONTAINER, fetch: fetchImpl });
+    await expect(store.listDocUrls()).rejects.toThrow(/refusing to follow a redirect/);
+  });
+
+  it("refuses a browser-style opaqueredirect response (status 0)", async () => {
+    const opaque = {
+      status: 0,
+      type: "opaqueredirect",
+      redirected: false,
+      ok: false,
+      headers: new Headers(),
+    } as unknown as Response;
+    const fetchImpl = (async () => opaque) as unknown as typeof globalThis.fetch;
+    const store = new SolidDocStore({ container: CONTAINER, fetch: fetchImpl });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(
+      /refusing to follow a redirect/,
+    );
+  });
+
+  it("refuses a response whose `redirected` flag is set (defensive)", async () => {
+    const redirected = {
+      status: 200,
+      type: "default",
+      redirected: true,
+      ok: true,
+      headers: new Headers({ "content-type": DOC_CONTENT_TYPE }),
+      text: async () => "{}",
+    } as unknown as Response;
+    const fetchImpl = (async () => redirected) as unknown as typeof globalThis.fetch;
+    const store = new SolidDocStore({ container: CONTAINER, fetch: fetchImpl });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(
+      /refusing to follow a redirect/,
+    );
+  });
+});
+
+describe("bounded response reads (oversized-body / memory-DoS guard)", () => {
+  it("refuses a body larger than maxResponseBytes (streamed)", async () => {
+    const big = "x".repeat(10_000);
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response(big, { status: 200, headers: { "content-type": DOC_CONTENT_TYPE } });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 64,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(/exceeds the 64-byte limit/);
+  });
+
+  it("refuses up front on an advertised Content-Length over the cap", async () => {
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response("small", {
+        status: 200,
+        headers: { "content-type": DOC_CONTENT_TYPE, "content-length": "999999" },
+      });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 8,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(/exceeds the 8-byte limit/);
+  });
+
+  it("reads a body within the cap normally", async () => {
+    const { pod, store } = makeStore();
+    void pod;
+    await store.putDoc(keyToResourceName("a"), '{"ok":true}', DOC_CONTENT_TYPE);
+    const got = await store.getDoc(keyToResourceName("a"));
+    expect(got?.body).toBe('{"ok":true}');
+  });
+
+  it("bounds the container listing read too", async () => {
+    const big = `x`.repeat(5000);
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response(big, { status: 200, headers: { "content-type": "text/turtle" } });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 32,
+    });
+    await expect(store.listDocUrls()).rejects.toThrow(/exceeds the 32-byte limit/);
+  });
+
+  // A GET response whose body is an ASYNC-ITERABLE (Node Readable-style) rather
+  // than a WHATWG ReadableStream — some auth-fetch shims return this shape. The
+  // cap must still be enforced by iterating it, not crash on a missing getReader.
+  function asyncIterableGet(
+    chunks: (string | Uint8Array)[],
+    opts?: { cancelSpy?: () => void; contentLength?: string },
+  ): typeof globalThis.fetch {
+    return (async () => {
+      let cancelled = false;
+      const body = {
+        async *[Symbol.asyncIterator]() {
+          for (const c of chunks) {
+            if (cancelled) return;
+            yield c;
+          }
+        },
+        destroy() {
+          cancelled = true;
+          opts?.cancelSpy?.();
+        },
+      };
+      const headers = new Headers({ "content-type": DOC_CONTENT_TYPE, etag: '"e1"' });
+      if (opts?.contentLength) headers.set("content-length", opts.contentLength);
+      return {
+        status: 200,
+        type: "default",
+        redirected: false,
+        ok: true,
+        headers,
+        body,
+        text: async () => {
+          throw new Error("text() must not be used when an async-iterable body is present");
+        },
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+  }
+
+  it("reads an async-iterable (Node Readable-style) body under the cap", async () => {
+    const fetchImpl = asyncIterableGet(['{"a":', "1}"]);
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 64,
+    });
+    const got = await store.getDoc(keyToResourceName("a"));
+    expect(got?.body).toBe('{"a":1}');
+    expect(got?.etag).toBe('"e1"');
+  });
+
+  it("bounds an async-iterable body over the cap (and cancels it)", async () => {
+    const cancelSpy = vi.fn();
+    const fetchImpl = asyncIterableGet(["xxxx", "yyyy", "zzzz"], { cancelSpy });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 6,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(/exceeds the 6-byte limit/);
+    expect(cancelSpy).toHaveBeenCalled();
+  });
+
+  it("cancels the body before throwing on an over-cap advertised Content-Length", async () => {
+    const cancelSpy = vi.fn();
+    const fetchImpl = asyncIterableGet(["ignored"], { cancelSpy, contentLength: "1000000" });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 8,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(/exceeds the 8-byte limit/);
+    expect(cancelSpy).toHaveBeenCalled();
+  });
+});
+
+describe("maxResponseBytes validation (never silently disable the cap)", () => {
+  it("resolveMaxResponseBytes maps every invalid value to the default", () => {
+    for (const bad of [
+      undefined,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      0,
+      -1,
+      -1024,
+      3.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      expect(resolveMaxResponseBytes(bad as number)).toBe(DEFAULT_MAX_RESPONSE_BYTES);
+    }
+  });
+
+  it("resolveMaxResponseBytes keeps a valid finite positive integer", () => {
+    expect(resolveMaxResponseBytes(1)).toBe(1);
+    expect(resolveMaxResponseBytes(4096)).toBe(4096);
+  });
+
+  it("a NaN cap falls back to the enforcing default (does NOT disable the limit)", async () => {
+    // content-length 100 MB > the 64 MiB default → still refused, proving NaN
+    // did NOT silently disable the cap (a NaN cap would make `> cap` always false).
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response("x", {
+        status: 200,
+        headers: { "content-type": DOC_CONTENT_TYPE, "content-length": "100000000" },
+      });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: Number.NaN,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(
+      /exceeds the \d+-byte limit/,
+    );
+  });
+
+  it("an Infinity cap falls back to the enforcing default too", async () => {
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response("x", {
+        status: 200,
+        headers: { "content-type": DOC_CONTENT_TYPE, "content-length": "100000000" },
+      });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: Number.POSITIVE_INFINITY,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(
+      /exceeds the \d+-byte limit/,
+    );
   });
 });
 
