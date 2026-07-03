@@ -63,6 +63,15 @@ export interface SolidDocStoreOptions {
  */
 export declare const DEFAULT_MAX_RESPONSE_BYTES: number;
 /**
+ * Normalise a caller-supplied `maxResponseBytes` to a SAFE cap. An invalid
+ * value (undefined, `NaN`, `Infinity`, non-positive, non-integer) must NEVER
+ * silently DISABLE the cap — a `NaN` cap would make every `total > cap` check
+ * `false` and read an unbounded body. So any invalid value falls back to
+ * {@link DEFAULT_MAX_RESPONSE_BYTES} (mirroring `@jeswr/y-solid`). The cap is
+ * therefore always a finite positive safe integer.
+ */
+export declare function resolveMaxResponseBytes(value: number | undefined): number;
+/**
  * Encode an arbitrary consumer-controlled primary key into a SAFE in-container
  * resource name.
  *

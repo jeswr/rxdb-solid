@@ -1,12 +1,14 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { assertWithinBase } from "./scope.js";
 import {
+  DEFAULT_MAX_RESPONSE_BYTES,
   DOC_CONTENT_TYPE,
   keyToResourceName,
   META_RESOURCE_NAME,
+  resolveMaxResponseBytes,
   resourceNameToKey,
   SolidDocStore,
 } from "./store.js";
@@ -379,6 +381,136 @@ describe("bounded response reads (oversized-body / memory-DoS guard)", () => {
       maxResponseBytes: 32,
     });
     await expect(store.listDocUrls()).rejects.toThrow(/exceeds the 32-byte limit/);
+  });
+
+  // A GET response whose body is an ASYNC-ITERABLE (Node Readable-style) rather
+  // than a WHATWG ReadableStream — some auth-fetch shims return this shape. The
+  // cap must still be enforced by iterating it, not crash on a missing getReader.
+  function asyncIterableGet(
+    chunks: (string | Uint8Array)[],
+    opts?: { cancelSpy?: () => void; contentLength?: string },
+  ): typeof globalThis.fetch {
+    return (async () => {
+      let cancelled = false;
+      const body = {
+        async *[Symbol.asyncIterator]() {
+          for (const c of chunks) {
+            if (cancelled) return;
+            yield c;
+          }
+        },
+        destroy() {
+          cancelled = true;
+          opts?.cancelSpy?.();
+        },
+      };
+      const headers = new Headers({ "content-type": DOC_CONTENT_TYPE, etag: '"e1"' });
+      if (opts?.contentLength) headers.set("content-length", opts.contentLength);
+      return {
+        status: 200,
+        type: "default",
+        redirected: false,
+        ok: true,
+        headers,
+        body,
+        text: async () => {
+          throw new Error("text() must not be used when an async-iterable body is present");
+        },
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+  }
+
+  it("reads an async-iterable (Node Readable-style) body under the cap", async () => {
+    const fetchImpl = asyncIterableGet(['{"a":', "1}"]);
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 64,
+    });
+    const got = await store.getDoc(keyToResourceName("a"));
+    expect(got?.body).toBe('{"a":1}');
+    expect(got?.etag).toBe('"e1"');
+  });
+
+  it("bounds an async-iterable body over the cap (and cancels it)", async () => {
+    const cancelSpy = vi.fn();
+    const fetchImpl = asyncIterableGet(["xxxx", "yyyy", "zzzz"], { cancelSpy });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 6,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(/exceeds the 6-byte limit/);
+    expect(cancelSpy).toHaveBeenCalled();
+  });
+
+  it("cancels the body before throwing on an over-cap advertised Content-Length", async () => {
+    const cancelSpy = vi.fn();
+    const fetchImpl = asyncIterableGet(["ignored"], { cancelSpy, contentLength: "1000000" });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: 8,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(/exceeds the 8-byte limit/);
+    expect(cancelSpy).toHaveBeenCalled();
+  });
+});
+
+describe("maxResponseBytes validation (never silently disable the cap)", () => {
+  it("resolveMaxResponseBytes maps every invalid value to the default", () => {
+    for (const bad of [
+      undefined,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      0,
+      -1,
+      -1024,
+      3.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      expect(resolveMaxResponseBytes(bad as number)).toBe(DEFAULT_MAX_RESPONSE_BYTES);
+    }
+  });
+
+  it("resolveMaxResponseBytes keeps a valid finite positive integer", () => {
+    expect(resolveMaxResponseBytes(1)).toBe(1);
+    expect(resolveMaxResponseBytes(4096)).toBe(4096);
+  });
+
+  it("a NaN cap falls back to the enforcing default (does NOT disable the limit)", async () => {
+    // content-length 100 MB > the 64 MiB default → still refused, proving NaN
+    // did NOT silently disable the cap (a NaN cap would make `> cap` always false).
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response("x", {
+        status: 200,
+        headers: { "content-type": DOC_CONTENT_TYPE, "content-length": "100000000" },
+      });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: Number.NaN,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(
+      /exceeds the \d+-byte limit/,
+    );
+  });
+
+  it("an Infinity cap falls back to the enforcing default too", async () => {
+    const fetchImpl: typeof globalThis.fetch = async () =>
+      new Response("x", {
+        status: 200,
+        headers: { "content-type": DOC_CONTENT_TYPE, "content-length": "100000000" },
+      });
+    const store = new SolidDocStore({
+      container: CONTAINER,
+      fetch: fetchImpl,
+      maxResponseBytes: Number.POSITIVE_INFINITY,
+    });
+    await expect(store.getDoc(keyToResourceName("a"))).rejects.toThrow(
+      /exceeds the \d+-byte limit/,
+    );
   });
 });
 

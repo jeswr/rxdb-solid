@@ -75,6 +75,21 @@ export interface SolidDocStoreOptions {
 export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
 /**
+ * Normalise a caller-supplied `maxResponseBytes` to a SAFE cap. An invalid
+ * value (undefined, `NaN`, `Infinity`, non-positive, non-integer) must NEVER
+ * silently DISABLE the cap — a `NaN` cap would make every `total > cap` check
+ * `false` and read an unbounded body. So any invalid value falls back to
+ * {@link DEFAULT_MAX_RESPONSE_BYTES} (mirroring `@jeswr/y-solid`). The cap is
+ * therefore always a finite positive safe integer.
+ */
+export function resolveMaxResponseBytes(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    return DEFAULT_MAX_RESPONSE_BYTES;
+  }
+  return value;
+}
+
+/**
  * Fail-closed refusal of a REDIRECTED response on a credentialed request.
  *
  * Every request the store issues carries the caller's authenticated `fetch`
@@ -99,57 +114,37 @@ function assertNotRedirected(res: Response, url: string): void {
   }
 }
 
-/** Total byte length of a UTF-8 string (no allocation of a second buffer). */
-function utf8ByteLength(s: string): number {
-  return new TextEncoder().encode(s).length;
+/** The over-cap error, one message for every path. */
+function overCapError(url: string, maxBytes: number, detail?: string): Error {
+  return new Error(
+    `[rxdb-solid] response body from ${url} exceeds the ${maxBytes}-byte limit${
+      detail ? ` (${detail})` : ""
+    }`,
+  );
 }
 
 /**
- * Read a response body to text with a HARD byte cap. Reads the body stream
- * chunk-by-chunk, aborting (and cancelling the stream) the instant the running
- * total exceeds `maxBytes`, so an oversized / endless body from a hostile
- * server can never be buffered into memory. An advertised `Content-Length`
- * over the cap is refused up front. Falls back to a bounded `res.text()` only
- * when the environment exposes no readable stream.
+ * Best-effort cancellation of a response body, tolerant of the concrete body
+ * shape. A WHATWG {@link ReadableStream} exposes `cancel()`; a Node-style
+ * `Readable`/async-iterable body may expose `destroy()`; anything else is left
+ * to GC. Never throws (a cancel failure must not mask the real error).
  */
-async function readTextBounded(res: Response, maxBytes: number, url: string): Promise<string> {
-  const advertised = res.headers.get("content-length");
-  if (advertised !== null) {
-    const n = Number(advertised);
-    if (Number.isFinite(n) && n > maxBytes) {
-      throw new Error(
-        `[rxdb-solid] response body from ${url} exceeds the ${maxBytes}-byte limit (content-length ${n})`,
-      );
-    }
-  }
-  const stream = res.body;
-  if (!stream) {
-    const text = await res.text();
-    if (utf8ByteLength(text) > maxBytes) {
-      throw new Error(`[rxdb-solid] response body from ${url} exceeds the ${maxBytes}-byte limit`);
-    }
-    return text;
-  }
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+async function cancelBody(body: unknown): Promise<void> {
+  if (body == null || typeof body !== "object") return;
+  const b = body as { cancel?: () => Promise<void> | void; destroy?: () => void };
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        throw new Error(
-          `[rxdb-solid] response body from ${url} exceeds the ${maxBytes}-byte limit`,
-        );
-      }
-      chunks.push(value);
+    if (typeof b.cancel === "function") {
+      await b.cancel();
+    } else if (typeof b.destroy === "function") {
+      b.destroy();
     }
-  } finally {
-    // Release the lock / abort any remaining body (no-op once fully drained).
-    await reader.cancel().catch(() => {});
+  } catch {
+    // ignore
   }
+}
+
+/** Accumulate chunks (Uint8Array or Buffer) into a single UTF-8 string. */
+function decodeChunks(chunks: Uint8Array[], total: number): string {
   const merged = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
@@ -157,6 +152,103 @@ async function readTextBounded(res: Response, maxBytes: number, url: string): Pr
     offset += chunk.byteLength;
   }
   return new TextDecoder("utf-8").decode(merged);
+}
+
+/** Coerce a stream/iterable chunk to a `Uint8Array` (handles string chunks). */
+function chunkToBytes(chunk: unknown): Uint8Array {
+  if (chunk instanceof Uint8Array) return chunk; // Buffer is a Uint8Array subclass
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  if (ArrayBuffer.isView(chunk)) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  if (typeof chunk === "string") return new TextEncoder().encode(chunk);
+  // Unknown chunk shape — treat as empty rather than crash; the caller still
+  // enforces the cap on the bytes we DID account for.
+  return new Uint8Array();
+}
+
+/**
+ * Read a response body to text with a HARD byte cap. Reads the body
+ * chunk-by-chunk, aborting (and cancelling the body) the instant the running
+ * total exceeds `maxBytes`, so an oversized / endless body from a hostile
+ * server can never be buffered into memory. An advertised `Content-Length`
+ * over the cap is refused up front (cancelling the body before throwing).
+ *
+ * **Body-shape tolerance.** A conforming `fetch` returns a WHATWG
+ * {@link ReadableStream} body (`getReader()`); some auth-fetch shims return a
+ * Node `Readable` / async-iterable body while still supporting `res.text()`.
+ * We use the web-stream path only when `res.body.getReader` is a function,
+ * else fall back to iterating an async-iterable body under the SAME cap. Only
+ * when the body is neither shape do we read via a bounded `res.text()`; if even
+ * `res.text()` is unavailable we FAIL CLOSED with a clear compatibility error
+ * (never an unbounded read).
+ */
+async function readTextBounded(res: Response, maxBytes: number, url: string): Promise<string> {
+  const body: unknown = res.body;
+  const advertised = res.headers.get("content-length");
+  if (advertised !== null) {
+    const n = Number(advertised);
+    if (Number.isFinite(n) && n > maxBytes) {
+      // Cancel the body we are about to abandon before throwing.
+      await cancelBody(body);
+      throw overCapError(url, maxBytes, `content-length ${n}`);
+    }
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  // 1) WHATWG ReadableStream body (the conforming fetch shape).
+  if (body != null && typeof (body as { getReader?: unknown }).getReader === "function") {
+    const reader = (body as ReadableStream<Uint8Array>).getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        total += value.byteLength;
+        if (total > maxBytes) throw overCapError(url, maxBytes);
+        chunks.push(value);
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+    return decodeChunks(chunks, total);
+  }
+
+  // 2) Node Readable / async-iterable body (still bounded).
+  if (
+    body != null &&
+    typeof (body as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+  ) {
+    try {
+      for await (const raw of body as AsyncIterable<unknown>) {
+        const value = chunkToBytes(raw);
+        total += value.byteLength;
+        if (total > maxBytes) throw overCapError(url, maxBytes);
+        chunks.push(value);
+      }
+    } catch (err) {
+      await cancelBody(body);
+      throw err;
+    }
+    return decodeChunks(chunks, total);
+  }
+
+  // 3) No iterable body — fall back to a bounded res.text() (still capped).
+  if (typeof res.text === "function") {
+    const text = await res.text();
+    if (new TextEncoder().encode(text).length > maxBytes) {
+      throw overCapError(url, maxBytes);
+    }
+    return text;
+  }
+
+  // 4) Neither a stream, an async-iterable, nor res.text() — fail closed
+  // rather than read an unbounded / unknown body.
+  throw new Error(
+    `[rxdb-solid] cannot read the response body from ${url}: the injected fetch returned a body that is neither a ReadableStream, an async-iterable, nor text-readable`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +369,9 @@ export class SolidDocStore {
     // normalizeContainer throws on a non-http(s) / non-absolute container.
     this.container = normalizeContainer(options.container);
     this.fetch = options.fetch;
-    this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    // Never let an invalid cap (NaN/Infinity/non-positive/non-integer) silently
+    // DISABLE the byte limit — an invalid value falls back to the default.
+    this.maxResponseBytes = resolveMaxResponseBytes(options.maxResponseBytes);
   }
 
   /** The absolute URL of the resource named `resourceName` under the container. */
