@@ -48,7 +48,20 @@ export interface SolidDocStoreOptions {
     container: string;
     /** The (authenticated) fetch the store issues every request with. */
     fetch: typeof globalThis.fetch;
+    /**
+     * Hard cap (bytes) on any response body the store reads. A hostile / buggy
+     * server cannot make the store allocate an unbounded buffer: a body that
+     * exceeds this is refused (the stream is cancelled) rather than read into
+     * memory. Default {@link DEFAULT_MAX_RESPONSE_BYTES}.
+     */
+    maxResponseBytes?: number;
 }
+/**
+ * Default {@link SolidDocStoreOptions.maxResponseBytes} — 64 MiB. Generous for
+ * a single JSON/RDF document while still bounding memory against a hostile
+ * server that streams an endless body.
+ */
+export declare const DEFAULT_MAX_RESPONSE_BYTES: number;
 /**
  * Encode an arbitrary consumer-controlled primary key into a SAFE in-container
  * resource name.
@@ -94,6 +107,7 @@ export declare class SolidDocStore {
     /** The normalised container URL (one trailing slash). */
     readonly container: string;
     private readonly fetch;
+    private readonly maxResponseBytes;
     constructor(options: SolidDocStoreOptions);
     /** The absolute URL of the resource named `resourceName` under the container. */
     resourceUrl(resourceName: string): string;
