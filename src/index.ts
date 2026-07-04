@@ -37,6 +37,10 @@ export {
   type SolidCheckpoint,
   type SolidReplicationOptions,
 } from "./replication.js";
+// Legacy scope-guard aliases (compat) — @deprecated, delegate to the
+// @jeswr/guarded-fetch podScope primitives above. Also published at the
+// `@jeswr/rxdb-solid/scope` subpath for existing consumers. See ./scope.ts.
+export { assertWithinBase, normalizeContainer } from "./scope.js";
 export {
   DEFAULT_MAX_RESPONSE_BYTES,
   DOC_CONTENT_TYPE,
