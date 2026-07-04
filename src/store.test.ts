@@ -1,8 +1,8 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { assertWithinPodScope } from "@jeswr/guarded-fetch";
 import { describe, expect, it, vi } from "vitest";
-import { assertWithinBase } from "./scope.js";
 import {
   DEFAULT_MAX_RESPONSE_BYTES,
   DOC_CONTENT_TYPE,
@@ -23,8 +23,8 @@ function makeStore() {
 }
 
 describe("browser-safety", () => {
-  it("the store + scope modules import no node: module (browser-usable)", () => {
-    for (const file of ["./store.ts", "./scope.ts"]) {
+  it("the store module imports no node: module (browser-usable)", () => {
+    for (const file of ["./store.ts"]) {
       const src = readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");
       expect(src).not.toMatch(/from\s+["']node:/);
     }
@@ -44,7 +44,7 @@ describe("SolidDocStore construction", () => {
 
 describe("key sanitisation — keyToResourceName / resourceNameToKey", () => {
   // An EXHAUSTIVE adversarial table: every entry must (1) produce a resource name
-  // whose URL passes assertWithinBase (no traversal/escape), and (2) round-trip.
+  // whose URL passes assertWithinPodScope (no traversal/escape), and (2) round-trip.
   const adversarial = [
     "simple",
     "with space",
@@ -83,7 +83,7 @@ describe("key sanitisation — keyToResourceName / resourceNameToKey", () => {
       const name = keyToResourceName(key);
       // (1) The resource URL must never escape the container — for ANY key.
       const url = CONTAINER + name;
-      expect(() => assertWithinBase(CONTAINER, url)).not.toThrow();
+      expect(() => assertWithinPodScope(CONTAINER, url, { allowRoot: false })).not.toThrow();
       // The encoded name has no path-significant or percent characters.
       expect(name).not.toMatch(/[/%]/);
       // The encoded BODY (between the fixed affixes) never contains a `..` path
@@ -220,20 +220,20 @@ describe("the scope guard is enforced on every op (SSRF backstop)", () => {
     // A sanitised document name always stays in-container; resourceUrl additionally
     // guards a RAW name that would traverse out via `..` path normalisation.
     expect(() => store.resourceUrl(keyToResourceName("a"))).not.toThrow();
-    expect(() => store.resourceUrl("../escape")).toThrow(/escapes container path/);
+    expect(() => store.resourceUrl("../escape")).toThrow(/escapes pod path/);
   });
 
   it("urlToResourceName refuses a foreign-origin URL", async () => {
     const { store } = makeStore();
     expect(() => store.urlToResourceName("https://evil.example/app/items/x")).toThrow(
-      /escapes container origin/,
+      /escapes pod origin/,
     );
   });
 
   it("rejects a sibling-path URL on urlToResourceName", () => {
     const { store } = makeStore();
     expect(() => store.urlToResourceName("https://alice.pod/app/other/x")).toThrow(
-      /escapes container path/,
+      /escapes pod path/,
     );
   });
 

@@ -30,10 +30,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./scope": {
-      "types": "./dist/scope.d.ts",
-      "import": "./dist/scope.js"
-    },
     "./store": {
       "types": "./dist/store.d.ts",
       "import": "./dist/store.js"
@@ -60,6 +56,7 @@
   },
   "dependencies": {
     "@jeswr/fetch-rdf": "^0.1.0",
+    "@jeswr/guarded-fetch": "github:jeswr/guarded-fetch#bd4490927fd36d62f6b78a0021e8d40bbb572c3b",
     "@solid/object": "^0.6.0",
     "n3": "^2.0.3"
   },

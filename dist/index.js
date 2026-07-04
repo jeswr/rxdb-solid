@@ -24,7 +24,7 @@
  *
  * @packageDocumentation
  */
+export { assertWithinPodScope, isContainerUrl, normalizePodBase, PodScopeError, } from "@jeswr/guarded-fetch";
 export { replicateSolid, } from "./replication.js";
-export { assertWithinBase, isContainerUrl, normalizeContainer } from "./scope.js";
 export { DEFAULT_MAX_RESPONSE_BYTES, DOC_CONTENT_TYPE, keyToResourceName, META_RESOURCE_NAME, resourceNameToKey, SolidDocStore, } from "./store.js";
 //# sourceMappingURL=index.js.map

@@ -61,9 +61,9 @@
  *   remote writes flow in real time without polling) is the documented follow-up.
  *
  * **Scope guard + key sanitisation (SSRF).** Every pod request goes through
- * {@link SolidDocStore}'s `assertWithinBase` guard, and every primary key is
- * mapped to an in-container resource name by an injective, traversal-proof
- * encoder — see {@link ./store.js}.
+ * {@link SolidDocStore}'s `assertWithinPodScope` guard (`@jeswr/guarded-fetch`),
+ * and every primary key is mapped to an in-container resource name by an
+ * injective, traversal-proof encoder — see {@link ./store.js}.
  */
 
 import type { RxCollection, WithDeleted } from "rxdb";

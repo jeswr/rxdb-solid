@@ -26,12 +26,17 @@
  */
 
 export {
+  assertWithinPodScope,
+  isContainerUrl,
+  normalizePodBase,
+  PodScopeError,
+} from "@jeswr/guarded-fetch";
+export {
   type RdfSerialization,
   replicateSolid,
   type SolidCheckpoint,
   type SolidReplicationOptions,
 } from "./replication.js";
-export { assertWithinBase, isContainerUrl, normalizeContainer } from "./scope.js";
 export {
   DEFAULT_MAX_RESPONSE_BYTES,
   DOC_CONTENT_TYPE,

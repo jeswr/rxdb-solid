@@ -14,9 +14,14 @@
  * keeps it a pure LDP client, like `@jeswr/solid-memory` / `@jeswr/y-solid`.
  *
  * **Scope guard on every op.** Every target URL is asserted to lie under
- * `container` (see {@link ./scope.js}) before any request — defence in depth, so
- * a caller-supplied or server-listed URL can never make the store touch a
+ * `container` (via `@jeswr/guarded-fetch`'s `assertWithinPodScope`, the suite's
+ * consolidated pod-scope guard) before any request — defence in depth, so a
+ * caller-supplied or server-listed URL can never make the store touch a
  * foreign origin or escape the container sub-tree. This is the SSRF backstop.
+ * Write-target ops (this store mints documents strictly UNDER the container,
+ * never at the container itself) pass `{ allowRoot: false }`; the one listing
+ * op that may legitimately observe the container as its own member passes
+ * `{ allowRoot: true }`.
  *
  * **RDF discipline (house rule).** The ONLY RDF the store touches is the
  * container LISTING, parsed (read-only) via `@jeswr/fetch-rdf` `parseRdf` +
@@ -88,7 +93,7 @@ export declare function resolveMaxResponseBytes(value: number | undefined): numb
  * affixes — containing NO `/`, NO `.` runs (`..`), NO `%`, NO whitespace, NO
  * control bytes, and nothing the WHATWG URL parser will normalise. As a result
  * `container + keyToResourceName(key)` is ALWAYS a strict descendant of the
- * container for ANY key, so {@link assertWithinBase} can never throw on it —
+ * container for ANY key, so `assertWithinPodScope` can never throw on it —
  * traversal is made structurally impossible, with the scope guard as the
  * defence-in-depth backstop.
  *
