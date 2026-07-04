@@ -97,8 +97,9 @@ Also exported:
 - `SolidDocStore`, `type SolidDocStoreOptions`, `type FetchedDoc`, `DOC_CONTENT_TYPE`,
   `META_RESOURCE_NAME` (`@jeswr/rxdb-solid/store`) — the lower-level LDP client.
 - `keyToResourceName`, `resourceNameToKey` — the injective, reversible key sanitiser.
-- `assertWithinBase`, `isContainerUrl`, `normalizeContainer` (`@jeswr/rxdb-solid/scope`) — the
-  fail-closed scope guard.
+- `assertWithinPodScope`, `isContainerUrl`, `normalizePodBase`, `PodScopeError` (re-exported from
+  [`@jeswr/guarded-fetch`](https://github.com/jeswr/guarded-fetch)) — the fail-closed pod-scope
+  guard this store's every operation runs through.
 - `type RdfSerialization`.
 
 ### Conflict handling
@@ -179,12 +180,14 @@ const { items } = await db.addCollections({
 ## Security: a fail-closed scope guard
 
 Every URL the store reads, writes, or deletes is asserted to lie **under the configured container**
-before any request (`assertWithinBase` — same-origin, path-prefixed, and the container root itself
-rejected for resource ops). A hostile or buggy server that lists a foreign-origin or path-escaping
-member can never make the plugin touch it: such members are skipped on read and rejected on write.
-The container is the one security boundary, applied as defence-in-depth on *every* operation. The
-auth seam is strict: `rxdb-solid` performs **no** crypto/DPoP and imports **no** concrete auth
-library — you inject an already-authenticated `fetch`.
+before any request, via [`@jeswr/guarded-fetch`](https://github.com/jeswr/guarded-fetch)'s
+consolidated pod-scope guard (`assertWithinPodScope` — same-origin, segment-boundary
+path-prefixed, and the container root itself rejected for resource ops via `{ allowRoot: false }`).
+A hostile or buggy server that lists a foreign-origin or path-escaping member can never make the
+plugin touch it: such members are skipped on read and rejected on write. The container is the one
+security boundary, applied as defence-in-depth on *every* operation. The auth seam is strict:
+`rxdb-solid` performs **no** crypto/DPoP and imports **no** concrete auth library — you inject an
+already-authenticated `fetch`.
 
 RDF discipline: the only RDF parsed is the LDP **container listing** (read-only), via
 [`@jeswr/fetch-rdf`](https://github.com/jeswr/fetch-rdf) +

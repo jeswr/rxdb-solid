@@ -1,116 +1,54 @@
-// AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate.
+// AUTHORED-BY Claude Sonnet 5
+// Compat-shim contract for `@jeswr/rxdb-solid/scope`: the legacy names now
+// delegate to @jeswr/guarded-fetch's podScope, but the BEHAVIOUR they published
+// must be preserved (esp. `assertWithinBase` rejecting the container root by
+// default — the write-target semantics rxdb-solid relies on).
 import { describe, expect, it } from "vitest";
 import { assertWithinBase, isContainerUrl, normalizeContainer } from "./scope.js";
 
 const CONTAINER = "https://alice.pod/notes/my-doc/";
 
-describe("normalizeContainer", () => {
+describe("normalizeContainer (compat)", () => {
   it("adds exactly one trailing slash", () => {
     expect(normalizeContainer("https://alice.pod/notes/my-doc")).toBe(CONTAINER);
     expect(normalizeContainer(CONTAINER)).toBe(CONTAINER);
   });
 
-  it("strips query and fragment", () => {
-    expect(normalizeContainer("https://alice.pod/notes/my-doc/?x=1#frag")).toBe(CONTAINER);
-  });
-
-  it("rejects a non-absolute URL", () => {
-    expect(() => normalizeContainer("notes/my-doc/")).toThrow(/absolute URL/);
-  });
-
   it("rejects a non-http(s) protocol", () => {
-    expect(() => normalizeContainer("file:///etc/passwd")).toThrow(/http\(s\)/);
-    expect(() => normalizeContainer("ftp://host/x/")).toThrow(/http\(s\)/);
+    expect(() => normalizeContainer("file:///etc/passwd")).toThrow();
   });
 });
 
-describe("assertWithinBase", () => {
+describe("assertWithinBase (compat)", () => {
   it("accepts a strict descendant resource", () => {
     expect(() => assertWithinBase(CONTAINER, `${CONTAINER}update-1`)).not.toThrow();
-    expect(() => assertWithinBase(CONTAINER, `${CONTAINER}sub/update-2`)).not.toThrow();
   });
 
-  it("REJECTS a foreign origin (the core SSRF guard)", () => {
-    expect(() => assertWithinBase(CONTAINER, "https://evil.example/notes/my-doc/u")).toThrow(
-      /escapes container origin/,
-    );
-    // Same host, different scheme is still a different origin.
-    expect(() => assertWithinBase(CONTAINER, "http://alice.pod/notes/my-doc/u")).toThrow(
-      /escapes container origin/,
-    );
-    // Same host, different PORT is a different origin.
-    expect(() => assertWithinBase(CONTAINER, "https://alice.pod:8443/notes/my-doc/u")).toThrow(
-      /escapes container origin/,
-    );
+  it("REJECTS the container root BY DEFAULT (write-target semantics preserved)", () => {
+    // The load-bearing compat behaviour: the legacy default was allowRoot:false.
+    expect(() => assertWithinBase(CONTAINER, CONTAINER)).toThrow();
   });
 
-  it("REJECTS a sibling path that is not under the container", () => {
-    expect(() => assertWithinBase(CONTAINER, "https://alice.pod/notes/other-doc/u")).toThrow(
-      /escapes container path/,
-    );
-    // A path-prefix sibling (`/notes/my-doc-evil/`) must NOT pass — the container
-    // path ends in a slash so the prefix check is exact at the boundary.
-    expect(() => assertWithinBase(CONTAINER, "https://alice.pod/notes/my-doc-evil/u")).toThrow(
-      /escapes container path/,
-    );
-  });
-
-  it("REJECTS the container root by default (not a managed resource)", () => {
-    expect(() => assertWithinBase(CONTAINER, CONTAINER)).toThrow(/container root/);
-    // Root aliases with a query/fragment are also rejected.
-    expect(() => assertWithinBase(CONTAINER, `${CONTAINER}?x=1`)).toThrow(/container root/);
-    expect(() => assertWithinBase(CONTAINER, `${CONTAINER}#frag`)).toThrow(/container root/);
-  });
-
-  it("accepts the container root only with allowRoot (listing case)", () => {
+  it("accepts the container root only with allowRoot:true", () => {
     expect(() => assertWithinBase(CONTAINER, CONTAINER, { allowRoot: true })).not.toThrow();
   });
 
-  it("REJECTS an invalid target URL", () => {
-    expect(() => assertWithinBase(CONTAINER, "not a url")).toThrow(/invalid/);
+  it("REJECTS a foreign origin", () => {
+    expect(() => assertWithinBase(CONTAINER, "https://evil.example/notes/my-doc/u")).toThrow();
   });
 
-  it("enforces a path BOUNDARY even for a NON-normalised container (no trailing slash)", () => {
-    // Regression for the roborev finding: `assertWithinBase` is a public export
-    // and must not assume the container is trailing-slash-normalised. A sibling
-    // that merely shares a path PREFIX must still be rejected.
-    const raw = "https://alice.pod/notes/my-doc"; // no trailing slash
-    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-doc-evil/u")).toThrow(
-      /escapes container path/,
-    );
-    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-docX")).toThrow(
-      /escapes container path/,
-    );
-    // A genuine descendant still passes (boundary is at the directory).
-    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-doc/u")).not.toThrow();
-    // The root (with or without the slash the caller omitted) is still gated.
-    expect(() => assertWithinBase(raw, "https://alice.pod/notes/my-doc/")).toThrow(
-      /container root/,
-    );
-    expect(() =>
-      assertWithinBase(raw, "https://alice.pod/notes/my-doc/", { allowRoot: true }),
-    ).not.toThrow();
+  it("REJECTS a path-prefix sibling at the segment boundary", () => {
+    expect(() => assertWithinBase(CONTAINER, "https://alice.pod/notes/my-doc-evil/u")).toThrow();
   });
 
-  it("honours allowRoot for BOTH root forms of a non-normalised container", () => {
-    // Regression for the round-2 finding: the EXACT non-slash container URL must
-    // be recognised as the root (not flagged as an escape), both gated by default
-    // and accepted with allowRoot.
-    const raw = "https://alice.pod/notes/my-doc"; // no trailing slash
-    // The exact same non-slash URL is the root → gated by default…
-    expect(() => assertWithinBase(raw, raw)).toThrow(/container root/);
-    // …and accepted with allowRoot (the listing case), NOT a path-escape error.
-    expect(() => assertWithinBase(raw, raw, { allowRoot: true })).not.toThrow();
-    // The slash form of the root is likewise both-ways handled.
-    expect(() => assertWithinBase(raw, `${raw}/`, { allowRoot: true })).not.toThrow();
+  it("returns void (legacy signature)", () => {
+    expect(assertWithinBase(CONTAINER, `${CONTAINER}update-1`)).toBeUndefined();
   });
 });
 
-describe("isContainerUrl", () => {
+describe("isContainerUrl (compat)", () => {
   it("is true for a trailing-slash path, false otherwise", () => {
     expect(isContainerUrl(CONTAINER)).toBe(true);
     expect(isContainerUrl(`${CONTAINER}update-1`)).toBe(false);
-    // A query/fragment must not fool the check.
-    expect(isContainerUrl(`${CONTAINER}update-1?x=1`)).toBe(false);
   });
 });

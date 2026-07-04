@@ -154,10 +154,10 @@ describe("3. scope guard rejects a foreign origin", () => {
     const pod = makePod(CONTAINER);
     const store = new SolidDocStore({ container: CONTAINER, fetch: pod.fetchImpl });
     expect(() => store.urlToResourceName("https://evil.example/app/items/x")).toThrow(
-      /escapes container origin/,
+      /escapes pod origin/,
     );
     expect(() => store.urlToResourceName("https://alice.pod/app/other/x")).toThrow(
-      /escapes container path/,
+      /escapes pod path/,
     );
   });
 });
